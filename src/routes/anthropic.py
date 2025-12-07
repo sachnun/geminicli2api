@@ -80,12 +80,9 @@ def authenticate_anthropic(
     description="""
 Create a message using Anthropic Claude-compatible format.
 
-**Models:** Use Gemini model names directly (e.g., `gemini-2.5-pro`, `gemini-2.5-flash`).
+**Models:** Use Gemini model names directly (e.g., `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-1.5-pro`).
 
-**Variants:**
-- `-search` suffix for Google Search grounding
-- `-nothinking` suffix to disable thinking
-- `-maxthinking` suffix for maximum thinking budget
+**Web Search:** Add `{"type": "web_search"}` to the `tools` array to enable Google Search grounding.
 
 **Authentication:** Requires either:
 - `x-api-key` header (Anthropic style)
@@ -95,7 +92,7 @@ Create a message using Anthropic Claude-compatible format.
 with Anthropic-style events (`message_start`, `content_block_delta`, etc.).
 
 **Extended Thinking:** Enable with `thinking: {type: "enabled", budget_tokens: 4096}`
-to receive model reasoning in the response.
+to receive model reasoning in the response. Use `{type: "disabled"}` to turn off thinking.
 
 **Tool Use:** Define tools in the `tools` array and receive `tool_use` content blocks
 when the model wants to call a tool.
