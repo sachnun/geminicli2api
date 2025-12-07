@@ -128,7 +128,7 @@ async def gemini_proxy(
 
         # Build and send request
         gemini_payload = build_gemini_payload_from_native(incoming_request, model_name)
-        response = send_gemini_request(gemini_payload, is_streaming=is_streaming)
+        response = await send_gemini_request(gemini_payload, is_streaming=is_streaming)
 
         if hasattr(response, "status_code"):
             if response.status_code != 200:

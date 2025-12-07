@@ -13,7 +13,12 @@ from ...models import (
     get_base_model_name,
     should_include_thoughts,
 )
-from ...config import DEFAULT_SAFETY_SETTINGS
+from ...config import (
+    DEFAULT_SAFETY_SETTINGS,
+    THINKING_MAX_BUDGETS,
+    THINKING_MINIMAL_BUDGETS,
+    THINKING_DEFAULT_BUDGET,
+)
 
 # Regex pattern for markdown images
 _MARKDOWN_IMAGE_PATTERN = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
@@ -322,37 +327,23 @@ def _build_thinking_config(
         return None
 
     base_model = get_base_model_name(model)
-
-    # Model-specific max budgets
-    max_budgets = {
-        "gemini-2.5-flash": 24576,
-        "gemini-2.5-pro": 32768,
-        "gemini-3-pro": 45000,
-    }
-    # Model-specific minimal budgets (off for flash, minimal for pro)
-    minimal_budgets = {
-        "gemini-2.5-flash": 0,
-        "gemini-2.5-pro": 128,
-        "gemini-3-pro": 128,
-    }
-
     thinking_budget: Optional[int] = None
 
     if reasoning_effort:
         effort_budgets = {
             # Disable thinking completely
-            "none": minimal_budgets,
-            "off": minimal_budgets,
-            "disabled": minimal_budgets,
+            "none": THINKING_MINIMAL_BUDGETS,
+            "off": THINKING_MINIMAL_BUDGETS,
+            "disabled": THINKING_MINIMAL_BUDGETS,
             # Minimal thinking
-            "minimal": minimal_budgets,
+            "minimal": THINKING_MINIMAL_BUDGETS,
             # Low thinking budget
             "low": {"default": 1000},
             # Auto/default thinking
-            "medium": {"default": -1},
+            "medium": {"default": THINKING_DEFAULT_BUDGET},
             # Maximum thinking
-            "high": max_budgets,
-            "max": max_budgets,
+            "high": THINKING_MAX_BUDGETS,
+            "max": THINKING_MAX_BUDGETS,
         }
 
         if reasoning_effort in effort_budgets:
@@ -363,7 +354,7 @@ def _build_thinking_config(
                     break
     else:
         # Default: auto thinking
-        thinking_budget = -1
+        thinking_budget = THINKING_DEFAULT_BUDGET
 
     if thinking_budget is not None:
         return {

@@ -8,7 +8,12 @@ import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from ...schemas import AnthropicMessagesRequest
-from ...config import DEFAULT_SAFETY_SETTINGS
+from ...config import (
+    DEFAULT_SAFETY_SETTINGS,
+    THINKING_MAX_BUDGETS,
+    THINKING_MINIMAL_BUDGETS,
+    THINKING_DEFAULT_BUDGET,
+)
 from ...models import (
     get_base_model_name,
     should_include_thoughts,
@@ -28,6 +33,18 @@ def anthropic_request_to_gemini(
         Dictionary in Gemini API format
     """
     contents = []
+
+    # Build a mapping of tool_use_id -> function_name from assistant messages
+    # This is needed to resolve function names when processing tool_result blocks
+    tool_use_id_to_name: Dict[str, str] = {}
+    for message in anthropic_request.messages:
+        if message.role == "assistant" and isinstance(message.content, list):
+            for block in message.content:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    tool_id = block.get("id", "")
+                    tool_name = block.get("name", "")
+                    if tool_id and tool_name:
+                        tool_use_id_to_name[tool_id] = tool_name
 
     # Handle system message/prompt
     system_instruction = None
@@ -112,10 +129,14 @@ def anthropic_request_to_gemini(
                                     text_parts.append(item.get("text", ""))
                             result_content = "\n".join(text_parts)
 
+                        # Look up the actual function name from tool_use_id
+                        # Falls back to tool_use_id if not found (for robustness)
+                        func_name = tool_use_id_to_name.get(tool_use_id, tool_use_id)
+
                         parts.append(
                             {
                                 "functionResponse": {
-                                    "name": tool_use_id,  # Use tool_use_id as name
+                                    "name": func_name,
                                     "response": {
                                         "result": result_content,
                                         "is_error": block.get("is_error", False),
@@ -131,9 +152,9 @@ def anthropic_request_to_gemini(
                         )
                 else:
                     # Handle Pydantic models or other objects
-                    if hasattr(block, "type"):
-                        if block.type == "text":
-                            parts.append({"text": getattr(block, "text", "")})
+                    block_type = getattr(block, "type", None)
+                    if block_type == "text":
+                        parts.append({"text": getattr(block, "text", "")})
 
         if parts:
             contents.append({"role": role, "parts": parts})
@@ -176,16 +197,13 @@ def anthropic_request_to_gemini(
     if anthropic_request.tools:
         for tool in anthropic_request.tools:
             # Check for web_search tool (custom extension)
-            if hasattr(tool, "type") and tool.type in (
-                "web_search",
-                "web_search_preview",
-            ):
+            tool_type = getattr(tool, "type", None)
+            tool_name = getattr(tool, "name", None)
+
+            if tool_type in ("web_search", "web_search_preview"):
                 has_web_search = True
                 continue
-            elif hasattr(tool, "name") and tool.name in (
-                "web_search",
-                "web_search_preview",
-            ):
+            elif tool_name in ("web_search", "web_search_preview"):
                 has_web_search = True
                 continue
 
@@ -220,15 +238,18 @@ def anthropic_request_to_gemini(
             ):
                 thinking_budget = anthropic_request.thinking.budget_tokens
             elif anthropic_request.thinking.type == "disabled":
-                # Use minimal thinking
+                # Use minimal thinking from centralized config
                 base_model = get_base_model_name(anthropic_request.model)
-                if "gemini-2.5-flash" in base_model:
+                for model_key, budget in THINKING_MINIMAL_BUDGETS.items():
+                    if model_key in base_model:
+                        thinking_budget = budget
+                        break
+                else:
+                    # Default minimal budget if no match
                     thinking_budget = 0
-                elif "gemini-2.5-pro" in base_model or "gemini-3-pro" in base_model:
-                    thinking_budget = 128
         else:
             # Default: auto thinking
-            thinking_budget = -1
+            thinking_budget = THINKING_DEFAULT_BUDGET
 
         if thinking_budget is not None:
             request_payload["generationConfig"]["thinkingConfig"] = {

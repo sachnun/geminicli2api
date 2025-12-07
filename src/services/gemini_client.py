@@ -3,12 +3,11 @@ Google Gemini API Client - Handles all communication with Google's Gemini API.
 Supports multiple credentials with automatic fallback on failure.
 """
 
-import asyncio
 import json
 import logging
-from typing import Any, AsyncGenerator, Dict, Optional, Tuple, Union
+from typing import Any, AsyncGenerator, Dict, Optional, Union
 
-import requests
+import httpx
 from fastapi import Response
 from fastapi.responses import StreamingResponse
 from google.auth.transport.requests import Request as GoogleAuthRequest
@@ -39,6 +38,8 @@ from ..config import (
     CODE_ASSIST_ENDPOINT,
     DEFAULT_SAFETY_SETTINGS,
     STREAMING_RESPONSE_HEADERS,
+    REQUEST_TIMEOUT,
+    STREAMING_TIMEOUT,
     create_error_response,
 )
 
@@ -67,49 +68,81 @@ async def _error_stream_generator(
     yield f"data: {json.dumps(error_data)}\n\n".encode("utf-8")
 
 
-async def _stream_generator(resp: requests.Response) -> AsyncGenerator[bytes, None]:
+async def _stream_generator(
+    url: str, payload: Dict[str, Any], headers: Dict[str, str]
+) -> AsyncGenerator[bytes, None]:
     """
-    Stream response chunks from Google API.
+    Stream response chunks from Google API using async httpx.
 
     Args:
-        resp: Response object from requests library
+        url: Target URL for the streaming request
+        payload: JSON payload to send
+        headers: Request headers
 
     Yields:
         Encoded SSE data chunks
     """
+    timeout = httpx.Timeout(STREAMING_TIMEOUT, connect=10.0)
     try:
-        with resp:
-            for chunk in resp.iter_lines():
-                if not chunk:
-                    continue
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream(
+                "POST", url, json=payload, headers=headers
+            ) as response:
+                if response.status_code != 200:
+                    await response.aread()
+                    logger.error(
+                        f"Google API error {response.status_code}: {response.text}"
+                    )
+                    error_message = f"Google API error: {response.status_code}"
+                    try:
+                        error_data = response.json()
+                        if "error" in error_data:
+                            error_message = error_data["error"].get(
+                                "message", error_message
+                            )
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+                    error_response = create_error_response(
+                        error_message, "api_error", response.status_code
+                    )
+                    yield f"data: {json.dumps(error_response)}\n\n".encode("utf-8")
+                    return
 
-                if not isinstance(chunk, str):
-                    chunk = chunk.decode("utf-8", "ignore")
+                async for line in response.aiter_lines():
+                    if not line:
+                        continue
 
-                if not chunk.startswith("data: "):
-                    continue
+                    if not line.startswith("data: "):
+                        continue
 
-                chunk_data = chunk[6:]  # Remove 'data: ' prefix
+                    chunk_data = line[6:]  # Remove 'data: ' prefix
 
-                try:
-                    obj = json.loads(chunk_data)
+                    try:
+                        obj = json.loads(chunk_data)
 
-                    if "response" in obj:
-                        response_chunk = obj["response"]
-                        response_json = json.dumps(
-                            response_chunk, separators=(",", ":")
+                        if "response" in obj:
+                            response_chunk = obj["response"]
+                            response_json = json.dumps(
+                                response_chunk, separators=(",", ":")
+                            )
+                            yield f"data: {response_json}\n\n".encode("utf-8")
+                        else:
+                            obj_json = json.dumps(obj, separators=(",", ":"))
+                            yield f"data: {obj_json}\n\n".encode("utf-8")
+
+                    except json.JSONDecodeError as e:
+                        logger.debug(
+                            f"Skipping non-JSON chunk: {e}, data: {chunk_data[:100]!r}"
                         )
-                        yield f"data: {response_json}\n\n".encode("utf-8")
-                    else:
-                        obj_json = json.dumps(obj, separators=(",", ":"))
-                        yield f"data: {obj_json}\n\n".encode("utf-8")
+                        continue
 
-                    await asyncio.sleep(0)
-
-                except json.JSONDecodeError:
-                    continue
-
-    except requests.exceptions.RequestException as e:
+    except httpx.TimeoutException as e:
+        logger.error(f"Streaming request timed out: {e}")
+        error_data = create_error_response(
+            "Request timed out. The API took too long to respond.", "api_error", 504
+        )
+        yield f"data: {json.dumps(error_data)}\n\n".encode("utf-8")
+    except httpx.RequestError as e:
         logger.error(f"Streaming request failed: {e}")
         error_data = create_error_response(
             f"Upstream request failed: {e}", "api_error", 502
@@ -121,78 +154,82 @@ async def _stream_generator(resp: requests.Response) -> AsyncGenerator[bytes, No
         yield f"data: {json.dumps(error_data)}\n\n".encode("utf-8")
 
 
-def _handle_streaming_response(resp: requests.Response) -> StreamingResponse:
-    """Handle streaming response from Google API."""
-    if resp.status_code != 200:
-        logger.error(f"Google API error {resp.status_code}: {resp.text}")
-        error_message = f"Google API error: {resp.status_code}"
+async def _make_non_streaming_request(
+    url: str, payload: Dict[str, Any], headers: Dict[str, str]
+) -> Response:
+    """
+    Make a non-streaming POST request using async httpx.
 
-        try:
-            error_data = resp.json()
-            if "error" in error_data:
-                error_message = error_data["error"].get("message", error_message)
-        except (json.JSONDecodeError, ValueError):
-            pass
+    Args:
+        url: Target URL
+        payload: JSON payload to send
+        headers: Request headers
 
-        return StreamingResponse(
-            _error_stream_generator(error_message, resp.status_code),
-            media_type="text/event-stream",
-            headers=STREAMING_RESPONSE_HEADERS,
-            status_code=resp.status_code,
-        )
+    Returns:
+        FastAPI Response object
+    """
+    timeout = httpx.Timeout(REQUEST_TIMEOUT, connect=10.0)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(url, json=payload, headers=headers)
 
-    return StreamingResponse(
-        _stream_generator(resp),
-        media_type="text/event-stream",
-        headers=STREAMING_RESPONSE_HEADERS,
-    )
+            if resp.status_code == 200:
+                try:
+                    response_text = resp.text
+                    if response_text.startswith("data: "):
+                        response_text = response_text[6:]
 
+                    google_response = json.loads(response_text)
+                    standard_response = google_response.get("response")
 
-def _handle_non_streaming_response(resp: requests.Response) -> Response:
-    """Handle non-streaming response from Google API."""
-    if resp.status_code == 200:
-        try:
-            response_text = resp.text
-            if response_text.startswith("data: "):
-                response_text = response_text[6:]
+                    return Response(
+                        content=json.dumps(standard_response),
+                        status_code=200,
+                        media_type="application/json; charset=utf-8",
+                    )
+                except (json.JSONDecodeError, AttributeError) as e:
+                    logger.error(
+                        f"Failed to parse response: {e}, data: {response_text[:500]!r}"
+                    )
+                    return Response(
+                        content=resp.content,
+                        status_code=resp.status_code,
+                        media_type=resp.headers.get("Content-Type"),
+                    )
 
-            google_response = json.loads(response_text)
-            standard_response = google_response.get("response")
+            # Handle error response
+            logger.error(f"Google API error {resp.status_code}: {resp.text}")
 
-            return Response(
-                content=json.dumps(standard_response),
-                status_code=200,
-                media_type="application/json; charset=utf-8",
-            )
-        except (json.JSONDecodeError, AttributeError) as e:
-            logger.error(f"Failed to parse response: {e}")
+            try:
+                error_data = resp.json()
+                if "error" in error_data:
+                    error_message = error_data["error"].get(
+                        "message", f"API error: {resp.status_code}"
+                    )
+                    return _create_json_error_response(error_message, resp.status_code)
+            except (json.JSONDecodeError, KeyError):
+                pass
+
             return Response(
                 content=resp.content,
                 status_code=resp.status_code,
                 media_type=resp.headers.get("Content-Type"),
             )
 
-    # Handle error response
-    logger.error(f"Google API error {resp.status_code}: {resp.text}")
-
-    try:
-        error_data = resp.json()
-        if "error" in error_data:
-            error_message = error_data["error"].get(
-                "message", f"API error: {resp.status_code}"
-            )
-            return _create_json_error_response(error_message, resp.status_code)
-    except (json.JSONDecodeError, KeyError):
-        pass
-
-    return Response(
-        content=resp.content,
-        status_code=resp.status_code,
-        media_type=resp.headers.get("Content-Type"),
-    )
+    except httpx.TimeoutException as e:
+        logger.error(f"Request timed out: {e}")
+        return _create_json_error_response(
+            "Request timed out. The API took too long to respond.", 504
+        )
+    except httpx.RequestError as e:
+        logger.error(f"Request failed: {e}")
+        return _create_json_error_response(f"Request failed: {e}", 502)
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
+        return _create_json_error_response(f"Unexpected error: {e}", 500)
 
 
-def send_gemini_request(
+async def send_gemini_request(
     payload: Dict[str, Any], is_streaming: bool = False
 ) -> Union[Response, StreamingResponse]:
     """
@@ -225,7 +262,9 @@ def send_gemini_request(
         )
 
     # Try to send request with current credential
-    response = _send_request_with_credential(payload, creds, cred_index, is_streaming)
+    response = await _send_request_with_credential(
+        payload, creds, cred_index, is_streaming
+    )
 
     # Check if we should try fallback
     if _should_try_fallback(response, cred_index, pool_stats):
@@ -236,7 +275,7 @@ def send_gemini_request(
         if fallback_result:
             fallback_creds, fallback_index = fallback_result
             logger.info(f"Retrying with fallback credential #{fallback_index + 1}")
-            response = _send_request_with_credential(
+            response = await _send_request_with_credential(
                 payload, fallback_creds, fallback_index, is_streaming
             )
 
@@ -286,7 +325,7 @@ def _is_error_response(response: Union[Response, StreamingResponse]) -> bool:
     return False
 
 
-def _send_request_with_credential(
+async def _send_request_with_credential(
     payload: Dict[str, Any],
     creds: Credentials,
     cred_index: int,
@@ -355,29 +394,14 @@ def _send_request_with_credential(
         "User-Agent": get_user_agent(),
     }
 
-    try:
-        if is_streaming:
-            resp = requests.post(
-                target_url,
-                data=json.dumps(final_payload),
-                headers=headers,
-                stream=True,
-            )
-            return _handle_streaming_response(resp)
-        else:
-            resp = requests.post(
-                target_url,
-                data=json.dumps(final_payload),
-                headers=headers,
-            )
-            return _handle_non_streaming_response(resp)
-
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Request failed: {e}")
-        return _create_json_error_response(f"Request failed: {e}", 500)
-    except Exception as e:
-        logger.error(f"Unexpected error: {e}")
-        return _create_json_error_response(f"Unexpected error: {e}", 500)
+    if is_streaming:
+        return StreamingResponse(
+            _stream_generator(target_url, final_payload, headers),
+            media_type="text/event-stream",
+            headers=STREAMING_RESPONSE_HEADERS,
+        )
+    else:
+        return await _make_non_streaming_request(target_url, final_payload, headers)
 
 
 def _get_project_id_for_credential(

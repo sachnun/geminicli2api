@@ -43,9 +43,11 @@ from ..config import (
 logger = logging.getLogger(__name__)
 
 # --- Constants ---
-CREDENTIAL_RECOVERY_TIME = 300  # 5 minutes before retrying failed credential
+# Import from config (centralized)
+from ..config import CREDENTIAL_RECOVERY_TIME
 
-# --- Global State ---
+# --- Global State with Thread Safety ---
+_state_lock = threading.Lock()  # Lock for global state
 _credentials: Optional[Credentials] = None
 _user_project_id: Optional[str] = None
 _onboarding_complete: bool = False
@@ -341,10 +343,13 @@ def _create_credentials_from_data(
         normalized = _normalize_credentials_data(creds_data)
         credentials = Credentials.from_authorized_user_info(normalized, SCOPES)
 
-        # Extract project_id if available
+        # Extract project_id if available (thread-safe)
         if "project_id" in creds_data:
-            _user_project_id = creds_data["project_id"]
-            logger.info(f"Extracted project_id from {source}: {_user_project_id}")
+            with _state_lock:
+                _user_project_id = creds_data["project_id"]
+            logger.info(
+                f"Extracted project_id from {source}: {creds_data['project_id']}"
+            )
 
         return credentials
     except Exception as e:
@@ -460,7 +465,10 @@ def save_credentials(creds: Credentials, project_id: Optional[str] = None) -> No
     """
     global _credentials_from_env
 
-    if _credentials_from_env:
+    with _state_lock:
+        from_env = _credentials_from_env
+
+    if from_env:
         # Only update project_id in existing file if needed
         if project_id and os.path.exists(CREDENTIAL_FILE):
             try:
@@ -529,7 +537,8 @@ def _load_credentials_from_env() -> Optional[Credentials]:
     # Try normal parsing first
     creds = _create_credentials_from_data(raw_data, "environment")
     if creds:
-        _credentials_from_env = True
+        with _state_lock:
+            _credentials_from_env = True
         if creds.expired:
             _refresh_credentials(creds)
         return creds
@@ -537,7 +546,8 @@ def _load_credentials_from_env() -> Optional[Credentials]:
     # Try minimal credentials as fallback
     creds = _create_minimal_credentials(raw_data)
     if creds:
-        _credentials_from_env = True
+        with _state_lock:
+            _credentials_from_env = True
         _refresh_credentials(creds)
         return creds
 
@@ -567,7 +577,8 @@ def _load_credentials_from_file() -> Optional[Credentials]:
     # Try normal parsing first
     creds = _create_credentials_from_data(raw_data, "file")
     if creds:
-        _credentials_from_env = bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
+        with _state_lock:
+            _credentials_from_env = bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
         if creds.expired and _refresh_credentials(creds):
             save_credentials(creds)
         return creds
@@ -575,7 +586,8 @@ def _load_credentials_from_file() -> Optional[Credentials]:
     # Try minimal credentials as fallback
     creds = _create_minimal_credentials(raw_data)
     if creds:
-        _credentials_from_env = bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
+        with _state_lock:
+            _credentials_from_env = bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
         if _refresh_credentials(creds):
             save_credentials(creds)
         return creds
@@ -864,7 +876,8 @@ def _run_oauth_flow() -> Optional[Credentials]:
         if not isinstance(creds, Credentials):
             logger.error("Unexpected credentials type from OAuth flow")
             return None
-        _credentials_from_env = False
+        with _state_lock:
+            _credentials_from_env = False
         save_credentials(creds)
         logger.info("Authentication successful!")
         return creds
@@ -887,23 +900,31 @@ def get_credentials(allow_oauth_flow: bool = True) -> Optional[Credentials]:
     """
     global _credentials
 
-    if _credentials and _credentials.token:
-        return _credentials
+    with _state_lock:
+        if _credentials and _credentials.token:
+            return _credentials
 
     # Try environment variable first
-    _credentials = _load_credentials_from_env()
-    if _credentials:
-        return _credentials
+    creds = _load_credentials_from_env()
+    if creds:
+        with _state_lock:
+            _credentials = creds
+        return creds
 
     # Try credentials file
-    _credentials = _load_credentials_from_file()
-    if _credentials:
-        return _credentials
+    creds = _load_credentials_from_file()
+    if creds:
+        with _state_lock:
+            _credentials = creds
+        return creds
 
     # Run OAuth flow if allowed
     if allow_oauth_flow:
-        _credentials = _run_oauth_flow()
-        return _credentials
+        creds = _run_oauth_flow()
+        if creds:
+            with _state_lock:
+                _credentials = creds
+        return creds
 
     logger.info("OAuth flow not allowed, returning None")
     return None
@@ -1057,7 +1078,8 @@ def is_credential_onboarded(index: int) -> bool:
         True if onboarded
     """
     if index == -1:
-        return _onboarding_complete
+        with _state_lock:
+            return _onboarding_complete
 
     pool = get_credential_pool()
     entry = pool.get_entry(index)
@@ -1074,7 +1096,8 @@ def set_credential_onboarded(index: int) -> None:
     global _onboarding_complete
 
     if index == -1:
-        _onboarding_complete = True
+        with _state_lock:
+            _onboarding_complete = True
         return
 
     pool = get_credential_pool()
@@ -1105,8 +1128,9 @@ def onboard_user(creds: Credentials, project_id: str) -> None:
     """
     global _onboarding_complete
 
-    if _onboarding_complete:
-        return
+    with _state_lock:
+        if _onboarding_complete:
+            return
 
     if creds.expired and creds.refresh_token:
         try:
@@ -1149,7 +1173,8 @@ def onboard_user(creds: Credentials, project_id: str) -> None:
             raise ValueError("GOOGLE_CLOUD_PROJECT environment variable required.")
 
         if load_data.get("currentTier"):
-            _onboarding_complete = True
+            with _state_lock:
+                _onboarding_complete = True
             return
 
         # Run onboarding
@@ -1169,7 +1194,8 @@ def onboard_user(creds: Credentials, project_id: str) -> None:
             lro_data = onboard_resp.json()
 
             if lro_data.get("done"):
-                _onboarding_complete = True
+                with _state_lock:
+                    _onboarding_complete = True
                 return
 
             time.sleep(ONBOARD_POLL_INTERVAL)
@@ -1329,14 +1355,17 @@ def get_user_project_id(creds: Credentials) -> str:
     env_project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
     if env_project_id:
         logger.info(f"Using project ID from env: {env_project_id}")
-        _user_project_id = env_project_id
-        save_credentials(creds, _user_project_id)
-        return _user_project_id
+        with _state_lock:
+            _user_project_id = env_project_id
+        save_credentials(creds, env_project_id)
+        return env_project_id
 
     # Priority 2: Cached value
-    if _user_project_id:
-        logger.info(f"Using cached project ID: {_user_project_id}")
-        return _user_project_id
+    with _state_lock:
+        cached_project_id = _user_project_id
+    if cached_project_id:
+        logger.info(f"Using cached project ID: {cached_project_id}")
+        return cached_project_id
 
     # Priority 3: Credential file
     if os.path.exists(CREDENTIAL_FILE):
@@ -1346,8 +1375,9 @@ def get_user_project_id(creds: Credentials) -> str:
                 cached = creds_data.get("project_id")
                 if cached:
                     logger.info(f"Using project ID from file: {cached}")
-                    _user_project_id = cached
-                    return cached  # Return local variable which is narrowed to str
+                    with _state_lock:
+                        _user_project_id = cached
+                    return cached
         except (IOError, json.JSONDecodeError) as e:
             logger.warning(f"Could not read project_id from file: {e}")
 
@@ -1392,9 +1422,10 @@ def get_user_project_id(creds: Credentials) -> str:
             )
 
         logger.info(f"Discovered project ID: {discovered}")
-        _user_project_id = discovered
-        save_credentials(creds, _user_project_id)
-        return discovered  # Return local variable which is narrowed to str
+        with _state_lock:
+            _user_project_id = discovered
+        save_credentials(creds, discovered)
+        return discovered
 
     except requests.exceptions.HTTPError as e:
         error_text = e.response.text if hasattr(e, "response") else str(e)

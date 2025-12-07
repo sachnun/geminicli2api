@@ -28,6 +28,33 @@ MODEL_CREATED_TIMESTAMP = 1677610602  # OpenAI model created timestamp
 # Timeouts and Intervals
 ONBOARD_POLL_INTERVAL = 5  # seconds
 ONBOARD_MAX_RETRIES = 60  # max retries for onboarding (5 min total)
+REQUEST_TIMEOUT = 300  # 5 minutes for API requests
+STREAMING_TIMEOUT = 600  # 10 minutes for streaming requests
+CREDENTIAL_RECOVERY_TIME = 300  # 5 minutes before retrying failed credential
+
+# Thinking Budget Configuration
+# Model-specific maximum thinking budgets
+THINKING_MAX_BUDGETS: Dict[str, int] = {
+    "gemini-2.5-flash": 24576,
+    "gemini-2.5-pro": 32768,
+    "gemini-3-pro": 45000,
+}
+
+# Model-specific minimal thinking budgets (off for flash, minimal for pro)
+THINKING_MINIMAL_BUDGETS: Dict[str, int] = {
+    "gemini-2.5-flash": 0,
+    "gemini-2.5-pro": 128,
+    "gemini-3-pro": 128,
+}
+
+# Default thinking budget (-1 = auto)
+THINKING_DEFAULT_BUDGET = -1
+
+# Error type constants
+ERROR_TYPE_API = "api_error"
+ERROR_TYPE_INVALID_REQUEST = "invalid_request_error"
+ERROR_TYPE_NOT_FOUND = "not_found_error"
+ERROR_TYPE_AUTH = "authentication_error"
 
 # Date Formats
 ISO_DATE_FORMAT = "%Y-%m-%dT%H:%M:%SZ"

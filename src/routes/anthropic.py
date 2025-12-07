@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
 from ..config import GEMINI_AUTH_PASSWORD
+from ..models.helpers import validate_model
 from ..schemas import AnthropicMessagesRequest
 from ..services.gemini_client import (
     build_gemini_payload_from_openai,
@@ -25,6 +26,7 @@ from .transformers import (
     format_sse_event,
     gemini_response_to_anthropic,
 )
+from .utils import decode_chunk
 
 router = APIRouter()
 
@@ -111,6 +113,24 @@ async def anthropic_messages(
     Supports both streaming and non-streaming modes.
     """
 
+    # Validate model
+    model_error = validate_model(request.model)
+    if model_error:
+        logging.warning(f"Invalid model requested: {request.model}")
+        return Response(
+            content=json.dumps(
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": model_error,
+                    },
+                }
+            ),
+            status_code=400,
+            media_type="application/json",
+        )
+
     try:
         logging.info(
             f"Anthropic messages request: model={request.model}, stream={request.stream}"
@@ -148,7 +168,7 @@ async def anthropic_messages(
         # Handle streaming response
         async def anthropic_stream_generator():
             try:
-                response = send_gemini_request(gemini_payload, is_streaming=True)
+                response = await send_gemini_request(gemini_payload, is_streaming=True)
 
                 if isinstance(response, StreamingResponse):
                     processor = AnthropicStreamProcessor(
@@ -159,12 +179,7 @@ async def anthropic_messages(
                     )
 
                     async for chunk in response.body_iterator:
-                        if isinstance(chunk, bytes):
-                            chunk_str = chunk.decode("utf-8", "ignore")
-                        elif isinstance(chunk, memoryview):
-                            chunk_str = bytes(chunk).decode("utf-8", "ignore")
-                        else:
-                            chunk_str = str(chunk)
+                        chunk_str = decode_chunk(chunk)
 
                         if chunk_str.startswith("data: "):
                             try:
@@ -198,7 +213,7 @@ async def anthropic_messages(
                                 UnicodeDecodeError,
                             ) as e:
                                 logging.warning(
-                                    f"Failed to parse streaming chunk: {str(e)}"
+                                    f"Failed to parse streaming chunk: {e}, data: {chunk_str[:200]!r}"
                                 )
                                 continue
 
@@ -216,15 +231,7 @@ async def anthropic_messages(
 
                     if hasattr(response, "body"):
                         try:
-                            error_body = response.body
-                            if isinstance(error_body, bytes):
-                                error_body_str = error_body.decode("utf-8", "ignore")
-                            elif isinstance(error_body, memoryview):
-                                error_body_str = bytes(error_body).decode(
-                                    "utf-8", "ignore"
-                                )
-                            else:
-                                error_body_str = str(error_body)
+                            error_body_str = decode_chunk(response.body)
                             error_data = json.loads(error_body_str)
                             if "error" in error_data:
                                 error_msg = error_data["error"].get(
@@ -257,7 +264,7 @@ async def anthropic_messages(
     else:
         # Handle non-streaming response
         try:
-            response = send_gemini_request(gemini_payload, is_streaming=False)
+            response = await send_gemini_request(gemini_payload, is_streaming=False)
 
             if isinstance(response, Response) and response.status_code != 200:
                 # Handle error responses from Google API
@@ -267,13 +274,7 @@ async def anthropic_messages(
                 error_type = "api_error"
 
                 try:
-                    error_body = response.body
-                    if isinstance(error_body, bytes):
-                        error_body_str = error_body.decode("utf-8", "ignore")
-                    elif isinstance(error_body, memoryview):
-                        error_body_str = bytes(error_body).decode("utf-8", "ignore")
-                    else:
-                        error_body_str = str(error_body)
+                    error_body_str = decode_chunk(response.body)
 
                     error_data = json.loads(error_body_str)
                     if "error" in error_data:
@@ -300,13 +301,7 @@ async def anthropic_messages(
 
             try:
                 # Parse Gemini response and transform to Anthropic format
-                response_body = response.body
-                if isinstance(response_body, bytes):
-                    response_body_str = response_body.decode("utf-8", "ignore")
-                elif isinstance(response_body, memoryview):
-                    response_body_str = bytes(response_body).decode("utf-8", "ignore")
-                else:
-                    response_body_str = str(response_body)
+                response_body_str = decode_chunk(response.body)
                 gemini_response = json.loads(response_body_str)
                 anthropic_response = gemini_response_to_anthropic(
                     gemini_response, request.model, include_thinking=include_thinking

@@ -17,12 +17,14 @@ from ..services.gemini_client import (
     build_gemini_payload_from_openai,
 )
 from ..schemas import ResponsesRequest
+from ..models.helpers import validate_model
 from ..config import create_error_response
 from .transformers import (
     responses_request_to_gemini,
     gemini_response_to_responses,
     gemini_stream_chunk_to_responses_events,
 )
+from .utils import decode_chunk, determine_error_type, handle_non_streaming_response
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -41,14 +43,7 @@ def _create_error_response(
 
 def _parse_response_body(response: Response) -> Dict[str, Any]:
     """Parse response body to dict."""
-    body = response.body
-    if isinstance(body, bytes):
-        body_str = body.decode("utf-8", "ignore")
-    elif isinstance(body, memoryview):
-        body_str = bytes(body).decode("utf-8", "ignore")
-    else:
-        body_str = str(body)
-    return json.loads(body_str)
+    return json.loads(decode_chunk(response.body))
 
 
 async def _stream_responses_response(
@@ -68,7 +63,7 @@ async def _stream_responses_response(
     output_index = 0
 
     try:
-        response = send_gemini_request(gemini_payload, is_streaming=True)
+        response = await send_gemini_request(gemini_payload, is_streaming=True)
 
         if not isinstance(response, StreamingResponse):
             # Handle error response
@@ -106,12 +101,7 @@ async def _stream_responses_response(
         accumulated_function_calls = []
 
         async for chunk in response.body_iterator:
-            if isinstance(chunk, bytes):
-                chunk_str = chunk.decode("utf-8", "ignore")
-            elif isinstance(chunk, memoryview):
-                chunk_str = bytes(chunk).decode("utf-8", "ignore")
-            else:
-                chunk_str = str(chunk)
+            chunk_str = decode_chunk(chunk)
 
             if not chunk_str.startswith("data: "):
                 continue
@@ -150,7 +140,7 @@ async def _stream_responses_response(
                 await asyncio.sleep(0)
 
             except (json.JSONDecodeError, KeyError, UnicodeDecodeError) as e:
-                logger.warning(f"Failed to parse chunk: {e}")
+                logger.warning(f"Failed to parse chunk: {e}, data: {chunk_str[:200]!r}")
                 continue
 
         # Send response.completed event
@@ -193,58 +183,16 @@ async def _stream_responses_response(
         yield "event: done\ndata: {}\n\n"
 
 
-def _handle_non_streaming_response(
+async def _handle_responses_non_streaming(
     gemini_payload: Dict[str, Any], model: str
 ) -> Union[Dict[str, Any], Response]:
-    """
-    Handle non-streaming Gemini request and response for Responses API.
-
-    Args:
-        gemini_payload: Prepared Gemini request payload
-        model: Model name for response
-
-    Returns:
-        Responses API formatted response dict or error Response
-    """
-    response = send_gemini_request(gemini_payload, is_streaming=False)
-
-    # Handle error responses
-    if isinstance(response, Response) and response.status_code != 200:
-        logger.error(f"Gemini API error: {response.status_code}")
-
-        try:
-            error_data = _parse_response_body(response)
-            if "error" in error_data:
-                error = error_data["error"]
-                error_type = (
-                    "invalid_request_error"
-                    if response.status_code == 404
-                    else "api_error"
-                )
-                return _create_error_response(
-                    error.get("message", f"API error: {response.status_code}"),
-                    response.status_code,
-                    error.get("type", error_type),
-                )
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            pass
-
-        error_type = (
-            "invalid_request_error" if response.status_code == 404 else "api_error"
-        )
-        return _create_error_response(
-            f"API error: {response.status_code}", response.status_code, error_type
-        )
-
-    # Parse and transform response
-    try:
-        gemini_response = _parse_response_body(response)
-        responses_response = gemini_response_to_responses(gemini_response, model)
-        logger.info(f"Processed Responses API response for model: {model}")
-        return responses_response
-    except (json.JSONDecodeError, AttributeError) as e:
-        logger.error(f"Failed to parse response: {e}")
-        return _create_error_response(f"Failed to process response: {e}", 500)
+    """Handle non-streaming Gemini request for Responses API format."""
+    return await handle_non_streaming_response(
+        gemini_payload,
+        model,
+        gemini_response_to_responses,
+        log_prefix="Processed Responses API response",
+    )
 
 
 @router.post(
@@ -275,6 +223,12 @@ async def responses_create(
     username: str = Depends(authenticate_user),
 ) -> Union[Dict[str, Any], Response, StreamingResponse]:
     """OpenAI Responses API endpoint."""
+    # Validate model
+    model_error = validate_model(request.model)
+    if model_error:
+        logger.warning(f"Invalid model requested: {request.model}")
+        return _create_error_response(model_error, 400, "invalid_request_error")
+
     try:
         logger.info(f"Responses API: model={request.model}, stream={request.stream}")
         gemini_request_data = responses_request_to_gemini(request)
@@ -292,7 +246,7 @@ async def responses_create(
         )
 
     try:
-        return _handle_non_streaming_response(gemini_payload, request.model)
+        return await _handle_responses_non_streaming(gemini_payload, request.model)
     except Exception as e:
         logger.error(f"Request failed: {e}")
         return _create_error_response(f"Request failed: {e}", 500)

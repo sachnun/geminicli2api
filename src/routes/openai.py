@@ -18,12 +18,14 @@ from ..services.gemini_client import (
 )
 from ..schemas import ChatCompletionRequest
 from ..models import SUPPORTED_MODELS
+from ..models.helpers import validate_model
 from ..config import MODEL_CREATED_TIMESTAMP, create_error_response
 from .transformers import (
     openai_request_to_gemini,
     gemini_response_to_openai,
     gemini_stream_chunk_to_openai,
 )
+from .utils import decode_chunk, determine_error_type, handle_non_streaming_response
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -42,14 +44,7 @@ def _create_error_response(
 
 def _parse_response_body(response: Response) -> Dict[str, Any]:
     """Parse response body to dict."""
-    body = response.body
-    if isinstance(body, bytes):
-        body_str = body.decode("utf-8", "ignore")
-    elif isinstance(body, memoryview):
-        body_str = bytes(body).decode("utf-8", "ignore")
-    else:
-        body_str = str(body)
-    return json.loads(body_str)
+    return json.loads(decode_chunk(response.body))
 
 
 async def _stream_openai_response(
@@ -68,7 +63,7 @@ async def _stream_openai_response(
     response_id = f"chatcmpl-{uuid.uuid4()}"
 
     try:
-        response = send_gemini_request(gemini_payload, is_streaming=True)
+        response = await send_gemini_request(gemini_payload, is_streaming=True)
 
         if not isinstance(response, StreamingResponse):
             # Handle error response
@@ -84,7 +79,7 @@ async def _stream_openai_response(
                     pass
 
             logger.error(f"Streaming failed: {error_msg}")
-            error_type = "invalid_request_error" if status_code == 404 else "api_error"
+            error_type = determine_error_type(status_code)
             yield f"data: {json.dumps(create_error_response(error_msg, error_type, status_code))}\n\n"
             yield "data: [DONE]\n\n"
             return
@@ -92,12 +87,7 @@ async def _stream_openai_response(
         logger.info(f"Starting stream: {response_id}")
 
         async for chunk in response.body_iterator:
-            if isinstance(chunk, bytes):
-                chunk_str = chunk.decode("utf-8", "ignore")
-            elif isinstance(chunk, memoryview):
-                chunk_str = bytes(chunk).decode("utf-8", "ignore")
-            else:
-                chunk_str = str(chunk)
+            chunk_str = decode_chunk(chunk)
 
             if not chunk_str.startswith("data: "):
                 continue
@@ -121,7 +111,7 @@ async def _stream_openai_response(
                 await asyncio.sleep(0)
 
             except (json.JSONDecodeError, KeyError, UnicodeDecodeError) as e:
-                logger.warning(f"Failed to parse chunk: {e}")
+                logger.warning(f"Failed to parse chunk: {e}, data: {chunk_str[:200]!r}")
                 continue
 
         yield "data: [DONE]\n\n"
@@ -133,58 +123,16 @@ async def _stream_openai_response(
         yield "data: [DONE]\n\n"
 
 
-def _handle_non_streaming_response(
+async def _handle_openai_non_streaming(
     gemini_payload: Dict[str, Any], model: str
 ) -> Union[Dict[str, Any], Response]:
-    """
-    Handle non-streaming Gemini request and response.
-
-    Args:
-        gemini_payload: Prepared Gemini request payload
-        model: Model name for response
-
-    Returns:
-        OpenAI-formatted response dict or error Response
-    """
-    response = send_gemini_request(gemini_payload, is_streaming=False)
-
-    # Handle error responses
-    if isinstance(response, Response) and response.status_code != 200:
-        logger.error(f"Gemini API error: {response.status_code}")
-
-        try:
-            error_data = _parse_response_body(response)
-            if "error" in error_data:
-                error = error_data["error"]
-                error_type = (
-                    "invalid_request_error"
-                    if response.status_code == 404
-                    else "api_error"
-                )
-                return _create_error_response(
-                    error.get("message", f"API error: {response.status_code}"),
-                    response.status_code,
-                    error.get("type", error_type),
-                )
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            pass
-
-        error_type = (
-            "invalid_request_error" if response.status_code == 404 else "api_error"
-        )
-        return _create_error_response(
-            f"API error: {response.status_code}", response.status_code, error_type
-        )
-
-    # Parse and transform response
-    try:
-        gemini_response = _parse_response_body(response)
-        openai_response = gemini_response_to_openai(gemini_response, model)
-        logger.info(f"Processed response for model: {model}")
-        return openai_response
-    except (json.JSONDecodeError, AttributeError) as e:
-        logger.error(f"Failed to parse response: {e}")
-        return _create_error_response(f"Failed to process response: {e}", 500)
+    """Handle non-streaming Gemini request for OpenAI format."""
+    return await handle_non_streaming_response(
+        gemini_payload,
+        model,
+        gemini_response_to_openai,
+        log_prefix="Processed response",
+    )
 
 
 @router.post(
@@ -212,6 +160,12 @@ async def openai_chat_completions(
     username: str = Depends(authenticate_user),
 ) -> Union[Dict[str, Any], Response, StreamingResponse]:
     """OpenAI-compatible chat completions endpoint."""
+    # Validate model
+    model_error = validate_model(request.model)
+    if model_error:
+        logger.warning(f"Invalid model requested: {request.model}")
+        return _create_error_response(model_error, 400, "invalid_request_error")
+
     try:
         logger.info(f"Chat completion: model={request.model}, stream={request.stream}")
         gemini_request_data = openai_request_to_gemini(request)
@@ -229,7 +183,7 @@ async def openai_chat_completions(
         )
 
     try:
-        return _handle_non_streaming_response(gemini_payload, request.model)
+        return await _handle_openai_non_streaming(gemini_payload, request.model)
     except Exception as e:
         logger.error(f"Request failed: {e}")
         return _create_error_response(f"Request failed: {e}", 500)
