@@ -105,7 +105,8 @@ for Google's Gemini models.
 - **Native Gemini** API passthrough
 - Multi-credential support with automatic failover
 - Streaming responses
-- Model variants: `-search` (Google Search), `-nothinking`, `-maxthinking`
+- Web search via `tools` parameter
+- Reasoning control via `reasoning_effort` (OpenAI) or `thinking` (Anthropic)
 
 ## Authentication
 
@@ -114,9 +115,9 @@ All endpoints (except `/health` and `/v1/models`) require authentication via
 
 ## Available Models
 
-Use Gemini model names directly (e.g., `gemini-2.5-flash`, `gemini-2.5-pro`).
+Use Gemini model names directly (e.g., `gemini-2.5-flash`, `gemini-2.5-pro`, `gemini-1.5-pro`).
 
-See `/v1/models` for the full list of available models and variants.
+See `/v1/models` for the full list of available models.
 """
 
 OPENAPI_TAGS = [

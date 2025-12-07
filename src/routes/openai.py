@@ -195,12 +195,14 @@ def _handle_non_streaming_response(
     description="""
 Create a chat completion using OpenAI-compatible format.
 
-**Models:** Use Gemini model names directly (e.g., `gemini-2.5-pro`, `gemini-2.5-flash`).
+**Models:** Use Gemini model names directly (e.g., `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-1.5-pro`).
 
-**Variants:**
-- `-search` suffix for Google Search grounding (e.g., `gemini-2.5-pro-search`)
-- `-nothinking` suffix to disable thinking
-- `-maxthinking` suffix for maximum thinking budget
+**Web Search:** Add `{"type": "web_search"}` to the `tools` array to enable Google Search grounding.
+
+**Reasoning Control:** Use `reasoning_effort` parameter:
+- `none`/`off`/`disabled` - disable thinking
+- `low`, `medium`, `high` - varying thinking budgets
+- `max` - maximum thinking budget
 
 **Streaming:** Set `stream: true` for Server-Sent Events (SSE) streaming.
 """,
