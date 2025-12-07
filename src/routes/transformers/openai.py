@@ -365,6 +365,97 @@ def _build_thinking_config(
     return None
 
 
+def _process_tool_response_message(message: Any) -> Dict[str, Any]:
+    """
+    Process a tool response message into Gemini functionResponse format.
+
+    Args:
+        message: Tool response message
+
+    Returns:
+        Gemini content dict with functionResponse part
+    """
+    func_name = getattr(message, "name", None) or "unknown"
+    msg_content = message.content if message.content else ""
+
+    # Parse content as JSON if possible, otherwise wrap as string
+    try:
+        if isinstance(msg_content, str):
+            response_data = json.loads(msg_content) if msg_content else {}
+        else:
+            response_data = {"result": str(msg_content)}
+    except (json.JSONDecodeError, TypeError):
+        response_data = {
+            "result": msg_content if isinstance(msg_content, str) else str(msg_content)
+        }
+
+    return {
+        "role": "user",
+        "parts": [{"functionResponse": {"name": func_name, "response": response_data}}],
+    }
+
+
+def _process_tool_call(tool_call: Any) -> Dict[str, Any]:
+    """
+    Process a single tool call into Gemini functionCall format.
+
+    Args:
+        tool_call: Tool call object (dict or Pydantic model)
+
+    Returns:
+        Gemini functionCall part dict
+    """
+    if hasattr(tool_call, "function"):
+        func = tool_call.function
+        func_name = (
+            func.get("name") if isinstance(func, dict) else getattr(func, "name", "")
+        )
+        func_args_str = (
+            func.get("arguments")
+            if isinstance(func, dict)
+            else getattr(func, "arguments", "{}")
+        )
+    else:
+        func = tool_call.get("function", {})
+        func_name = func.get("name", "")
+        func_args_str = func.get("arguments", "{}")
+
+    # Parse arguments JSON string to dict
+    try:
+        func_args = json.loads(func_args_str) if func_args_str else {}
+    except (json.JSONDecodeError, TypeError):
+        func_args = {}
+
+    return {"functionCall": {"name": func_name, "args": func_args}}
+
+
+def _process_assistant_message_with_tools(
+    message: Any, tool_calls: List[Any]
+) -> Dict[str, Any]:
+    """
+    Process an assistant message with tool calls into Gemini format.
+
+    Args:
+        message: Assistant message
+        tool_calls: List of tool calls
+
+    Returns:
+        Gemini content dict with functionCall parts
+    """
+    parts: List[Dict[str, Any]] = []
+
+    # Add text content if present
+    if message.content:
+        text_parts = _process_message_content(message.content)
+        parts.extend(text_parts)
+
+    # Add function calls
+    for tool_call in tool_calls:
+        parts.append(_process_tool_call(tool_call))
+
+    return {"role": "model", "parts": parts}
+
+
 def openai_request_to_gemini(
     openai_request: ChatCompletionRequest,
 ) -> Dict[str, Any]:
@@ -385,88 +476,18 @@ def openai_request_to_gemini(
 
         # Handle tool/function response messages
         if role == "tool":
-            # Tool response message - convert to Gemini functionResponse format
-            tool_call_id = getattr(message, "tool_call_id", None)
-            func_name = getattr(message, "name", None) or "unknown"
-            msg_content = message.content if message.content else ""
-
-            # Parse content as JSON if possible, otherwise wrap as string
-            try:
-                if isinstance(msg_content, str):
-                    response_data = json.loads(msg_content) if msg_content else {}
-                else:
-                    response_data = {"result": str(msg_content)}
-            except (json.JSONDecodeError, TypeError):
-                response_data = {
-                    "result": msg_content
-                    if isinstance(msg_content, str)
-                    else str(msg_content)
-                }
-
-            parts = [
-                {
-                    "functionResponse": {
-                        "name": func_name,
-                        "response": response_data,
-                    }
-                }
-            ]
-            contents.append({"role": "user", "parts": parts})
+            contents.append(_process_tool_response_message(message))
             continue
 
         # Handle assistant messages with tool_calls
         if role == "assistant":
-            role = "model"
             tool_calls = getattr(message, "tool_calls", None)
-
             if tool_calls:
-                # Assistant message with function calls
-                parts: List[Dict[str, Any]] = []
-
-                # Add text content if present
-                if message.content:
-                    text_parts = _process_message_content(message.content)
-                    parts.extend(text_parts)
-
-                # Add function calls
-                for tool_call in tool_calls:
-                    if hasattr(tool_call, "function"):
-                        func = tool_call.function
-                        func_name = (
-                            func.get("name")
-                            if isinstance(func, dict)
-                            else getattr(func, "name", "")
-                        )
-                        func_args_str = (
-                            func.get("arguments")
-                            if isinstance(func, dict)
-                            else getattr(func, "arguments", "{}")
-                        )
-                    else:
-                        func = tool_call.get("function", {})
-                        func_name = func.get("name", "")
-                        func_args_str = func.get("arguments", "{}")
-
-                    # Parse arguments JSON string to dict
-                    try:
-                        func_args = json.loads(func_args_str) if func_args_str else {}
-                    except (json.JSONDecodeError, TypeError):
-                        func_args = {}
-
-                    parts.append(
-                        {
-                            "functionCall": {
-                                "name": func_name,
-                                "args": func_args,
-                            }
-                        }
-                    )
-
-                contents.append({"role": role, "parts": parts})
+                contents.append(
+                    _process_assistant_message_with_tools(message, tool_calls)
+                )
                 continue
-
-        # Standard role mapping
-        if role == "assistant":
+            # No tool_calls, map role for standard processing
             role = "model"
         elif role == "system":
             role = "user"

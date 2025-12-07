@@ -7,6 +7,7 @@ import json
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
+from .anthropic_stream import AnthropicStreamProcessor, format_sse_event
 from ...schemas import AnthropicMessagesRequest
 from ...config import (
     DEFAULT_SAFETY_SETTINGS,
@@ -18,6 +19,113 @@ from ...models import (
     get_base_model_name,
     should_include_thoughts,
 )
+
+
+def _process_text_block(block: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Process a text content block into Gemini format."""
+    return {"text": block.get("text", "")}
+
+
+def _process_image_block(block: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Process an image content block into Gemini format."""
+    source = block.get("source", {})
+    source_type = source.get("type", "")
+
+    if source_type == "base64":
+        media_type = source.get("media_type", "image/png")
+        data = source.get("data", "")
+        return {"inlineData": {"mimeType": media_type, "data": data}}
+
+    if source_type == "url":
+        url = source.get("url", "")
+        return {"text": f"[Image: {url}]"}
+
+    return None
+
+
+def _process_tool_use_block(block: Dict[str, Any]) -> Dict[str, Any]:
+    """Process a tool_use content block into Gemini functionCall format."""
+    return {
+        "functionCall": {
+            "name": block.get("name", ""),
+            "args": block.get("input", {}),
+        }
+    }
+
+
+def _process_tool_result_block(
+    block: Dict[str, Any], tool_use_id_to_name: Dict[str, str]
+) -> Dict[str, Any]:
+    """Process a tool_result content block into Gemini functionResponse format."""
+    tool_use_id = block.get("tool_use_id", "")
+    result_content = block.get("content", "")
+
+    # Convert content to string if it's a list
+    if isinstance(result_content, list):
+        text_parts = [
+            item.get("text", "")
+            for item in result_content
+            if isinstance(item, dict) and item.get("type") == "text"
+        ]
+        result_content = "\n".join(text_parts)
+
+    # Look up the actual function name from tool_use_id
+    func_name = tool_use_id_to_name.get(tool_use_id, tool_use_id)
+
+    return {
+        "functionResponse": {
+            "name": func_name,
+            "response": {
+                "result": result_content,
+                "is_error": block.get("is_error", False),
+            },
+        }
+    }
+
+
+def _process_thinking_block(block: Dict[str, Any]) -> Dict[str, Any]:
+    """Process a thinking content block into Gemini format."""
+    return {"text": block.get("thinking", ""), "thought": True}
+
+
+def _process_content_block(
+    block: Any, tool_use_id_to_name: Dict[str, str]
+) -> Optional[Dict[str, Any]]:
+    """
+    Process a single content block and return Gemini-formatted part.
+
+    Args:
+        block: Content block (dict or Pydantic model)
+        tool_use_id_to_name: Mapping of tool_use_id to function name
+
+    Returns:
+        Gemini-formatted part dict, or None if block should be skipped
+    """
+    if not isinstance(block, dict):
+        # Handle Pydantic models or other objects
+        block_type = getattr(block, "type", None)
+        if block_type == "text":
+            return {"text": getattr(block, "text", "")}
+        return None
+
+    block_type = block.get("type", "text")
+
+    if block_type == "text":
+        return _process_text_block(block)
+
+    if block_type == "image":
+        return _process_image_block(block)
+
+    if block_type == "tool_use":
+        return _process_tool_use_block(block)
+
+    if block_type == "tool_result":
+        return _process_tool_result_block(block, tool_use_id_to_name)
+
+    if block_type == "thinking":
+        return _process_thinking_block(block)
+
+    return None
 
 
 def anthropic_request_to_gemini(
@@ -77,84 +185,11 @@ def anthropic_request_to_gemini(
             # Simple text content
             parts.append({"text": content})
         elif isinstance(content, list):
-            # List of content blocks
+            # List of content blocks - dispatch to helper functions
             for block in content:
-                if isinstance(block, dict):
-                    block_type = block.get("type", "text")
-
-                    if block_type == "text":
-                        parts.append({"text": block.get("text", "")})
-
-                    elif block_type == "image":
-                        # Handle image content
-                        source = block.get("source", {})
-                        source_type = source.get("type", "")
-
-                        if source_type == "base64":
-                            media_type = source.get("media_type", "image/png")
-                            data = source.get("data", "")
-                            parts.append(
-                                {"inlineData": {"mimeType": media_type, "data": data}}
-                            )
-                        elif source_type == "url":
-                            # URL-based images would need to be fetched
-                            # For now, skip or add as text reference
-                            url = source.get("url", "")
-                            parts.append({"text": f"[Image: {url}]"})
-
-                    elif block_type == "tool_use":
-                        # Tool use from assistant - convert to function call
-                        parts.append(
-                            {
-                                "functionCall": {
-                                    "name": block.get("name", ""),
-                                    "args": block.get("input", {}),
-                                }
-                            }
-                        )
-
-                    elif block_type == "tool_result":
-                        # Tool result from user - convert to function response
-                        tool_use_id = block.get("tool_use_id", "")
-                        result_content = block.get("content", "")
-
-                        # Convert content to string if it's a list
-                        if isinstance(result_content, list):
-                            text_parts = []
-                            for item in result_content:
-                                if (
-                                    isinstance(item, dict)
-                                    and item.get("type") == "text"
-                                ):
-                                    text_parts.append(item.get("text", ""))
-                            result_content = "\n".join(text_parts)
-
-                        # Look up the actual function name from tool_use_id
-                        # Falls back to tool_use_id if not found (for robustness)
-                        func_name = tool_use_id_to_name.get(tool_use_id, tool_use_id)
-
-                        parts.append(
-                            {
-                                "functionResponse": {
-                                    "name": func_name,
-                                    "response": {
-                                        "result": result_content,
-                                        "is_error": block.get("is_error", False),
-                                    },
-                                }
-                            }
-                        )
-
-                    elif block_type == "thinking":
-                        # Thinking content - include as thought
-                        parts.append(
-                            {"text": block.get("thinking", ""), "thought": True}
-                        )
-                else:
-                    # Handle Pydantic models or other objects
-                    block_type = getattr(block, "type", None)
-                    if block_type == "text":
-                        parts.append({"text": getattr(block, "text", "")})
+                part = _process_content_block(block, tool_use_id_to_name)
+                if part is not None:
+                    parts.append(part)
 
         if parts:
             contents.append({"role": role, "parts": parts})
@@ -512,182 +547,3 @@ def create_anthropic_error(error_type: str, message: str) -> Dict[str, Any]:
         error event dictionary
     """
     return {"type": "error", "error": {"type": error_type, "message": message}}
-
-
-class AnthropicStreamProcessor:
-    """
-    Processor for converting Gemini streaming chunks to Anthropic SSE format.
-    Maintains state across multiple chunks to properly emit events.
-    """
-
-    def __init__(self, model: str, include_thinking: bool = False):
-        self.model = model
-        self.include_thinking = include_thinking
-        self.message_id = f"msg_{uuid.uuid4().hex[:24]}"
-        self.current_block_index = -1
-        self.current_block_type = None
-        self.is_thinking = False
-        self.has_started = False
-        self.output_tokens = 0
-        self.stop_reason = "end_turn"
-        self.pending_tool_call = None
-
-    def process_chunk(self, gemini_chunk: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """
-        Process a Gemini streaming chunk and return Anthropic SSE events.
-
-        Args:
-            gemini_chunk: A chunk from Gemini streaming response
-
-        Returns:
-            List of Anthropic SSE events to emit
-        """
-        events = []
-
-        # Emit message_start on first chunk
-        if not self.has_started:
-            events.append(
-                create_anthropic_stream_message_start(self.model, self.message_id)
-            )
-            self.has_started = True
-
-        for candidate in gemini_chunk.get("candidates", []):
-            parts = candidate.get("content", {}).get("parts", [])
-
-            for part in parts:
-                # Handle text/thinking parts
-                if part.get("text") is not None:
-                    is_thought = part.get("thought", False)
-                    text = part.get("text", "")
-
-                    if not text:
-                        continue
-
-                    # Skip thinking blocks if not requested
-                    if is_thought and not self.include_thinking:
-                        continue
-
-                    # Determine block type
-                    block_type = "thinking" if is_thought else "text"
-                    delta_type = "thinking_delta" if is_thought else "text_delta"
-
-                    # Check if we need to start a new block
-                    if self.current_block_type != block_type:
-                        # Close previous block if any
-                        if self.current_block_index >= 0:
-                            events.append(
-                                create_anthropic_content_block_stop(
-                                    self.current_block_index
-                                )
-                            )
-
-                        # Start new block
-                        self.current_block_index += 1
-                        self.current_block_type = block_type
-                        events.append(
-                            create_anthropic_content_block_start(
-                                self.current_block_index, block_type
-                            )
-                        )
-
-                    # Emit content delta
-                    events.append(
-                        create_anthropic_content_block_delta(
-                            self.current_block_index, delta_type, text
-                        )
-                    )
-
-                    self.output_tokens += len(text) // 4  # Rough estimate
-
-                # Handle function calls
-                elif part.get("functionCall"):
-                    func_call = part["functionCall"]
-
-                    # Close previous block if any
-                    if (
-                        self.current_block_index >= 0
-                        and self.current_block_type != "tool_use"
-                    ):
-                        events.append(
-                            create_anthropic_content_block_stop(
-                                self.current_block_index
-                            )
-                        )
-
-                    # Start tool_use block
-                    self.current_block_index += 1
-                    self.current_block_type = "tool_use"
-
-                    tool_id = f"toolu_{uuid.uuid4().hex[:24]}"
-                    events.append(
-                        {
-                            "type": "content_block_start",
-                            "index": self.current_block_index,
-                            "content_block": {
-                                "type": "tool_use",
-                                "id": tool_id,
-                                "name": func_call.get("name", ""),
-                                "input": {},
-                            },
-                        }
-                    )
-
-                    # Emit input as delta
-                    input_json = json.dumps(func_call.get("args", {}))
-                    events.append(
-                        create_anthropic_content_block_delta(
-                            self.current_block_index, "input_json_delta", input_json
-                        )
-                    )
-
-                    self.stop_reason = "tool_use"
-
-            # Check finish reason
-            finish_reason = candidate.get("finishReason", "")
-            if finish_reason == "STOP":
-                self.stop_reason = "end_turn"
-            elif finish_reason == "MAX_TOKENS":
-                self.stop_reason = "max_tokens"
-
-        # Update token count from usage metadata
-        usage_metadata = gemini_chunk.get("usageMetadata", {})
-        if usage_metadata.get("candidatesTokenCount"):
-            self.output_tokens = usage_metadata["candidatesTokenCount"]
-
-        return events
-
-    def finalize(self) -> List[Dict[str, Any]]:
-        """
-        Generate final events to close the stream.
-
-        Returns:
-            List of final Anthropic SSE events
-        """
-        events = []
-
-        # Close last content block if any
-        if self.current_block_index >= 0:
-            events.append(create_anthropic_content_block_stop(self.current_block_index))
-
-        # Emit message_delta with final stats
-        events.append(
-            create_anthropic_message_delta(self.stop_reason, self.output_tokens)
-        )
-
-        # Emit message_stop
-        events.append(create_anthropic_message_stop())
-
-        return events
-
-
-def format_sse_event(event: Dict[str, Any]) -> str:
-    """
-    Format an event as an SSE data line.
-
-    Args:
-        event: Event dictionary
-
-    Returns:
-        Formatted SSE string
-    """
-    return f"event: {event['type']}\ndata: {json.dumps(event)}\n\n"
