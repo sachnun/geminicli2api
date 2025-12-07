@@ -150,34 +150,40 @@ API authentication supports:
 - Query Parameter: `?key=<password>`
 - Google Header: `x-goog-api-key: <password>`
 
-## Usage Example
+## Usage Examples
 
-### OpenAI Chat Completions
+### OpenAI SDK
+
+```bash
+pip install openai
+```
 
 ```python
-import openai
+from openai import OpenAI
 
-client = openai.OpenAI(
+client = OpenAI(
     base_url="http://localhost:8888/v1",
     api_key="your_password"
 )
 
+# Basic chat completion
 response = client.chat.completions.create(
     model="gemini-2.5-flash",
     messages=[{"role": "user", "content": "Hello!"}]
 )
-```
+print(response.choices[0].message.content)
 
-### Function Calling
-
-```python
-import openai
-
-client = openai.OpenAI(
-    base_url="http://localhost:8888/v1",
-    api_key="your_password"
+# With streaming
+stream = client.chat.completions.create(
+    model="gemini-2.5-flash",
+    messages=[{"role": "user", "content": "Tell me a story"}],
+    stream=True
 )
+for chunk in stream:
+    if chunk.choices[0].delta.content:
+        print(chunk.choices[0].delta.content, end="")
 
+# Function calling
 tools = [
     {
         "type": "function",
@@ -186,9 +192,7 @@ tools = [
             "description": "Get weather for a location",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "location": {"type": "string"}
-                },
+                "properties": {"location": {"type": "string"}},
                 "required": ["location"]
             }
         }
@@ -201,37 +205,128 @@ response = client.chat.completions.create(
     tools=tools
 )
 
-# Handle tool calls
 if response.choices[0].message.tool_calls:
     tool_call = response.choices[0].message.tool_calls[0]
     print(f"Function: {tool_call.function.name}")
     print(f"Arguments: {tool_call.function.arguments}")
+
+# With web search
+response = client.chat.completions.create(
+    model="gemini-2.5-flash",
+    messages=[{"role": "user", "content": "What are the latest AI news?"}],
+    tools=[{"type": "web_search"}]
+)
+
+# With reasoning control
+response = client.chat.completions.create(
+    model="gemini-2.5-flash",
+    messages=[{"role": "user", "content": "Solve this math problem: 15 * 27"}],
+    extra_body={"reasoning_effort": "high"}
+)
 ```
 
-### Responses API
+### Anthropic SDK
+
+```bash
+pip install anthropic
+```
+
+```python
+from anthropic import Anthropic
+
+client = Anthropic(
+    base_url="http://localhost:8888",
+    api_key="your_password"
+)
+
+# Basic message
+response = client.messages.create(
+    model="gemini-2.5-flash",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+print(response.content[0].text)
+
+# With streaming
+with client.messages.stream(
+    model="gemini-2.5-flash",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "Tell me a story"}]
+) as stream:
+    for text in stream.text_stream:
+        print(text, end="")
+
+# Function calling
+response = client.messages.create(
+    model="gemini-2.5-flash",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "What's the weather in Paris?"}],
+    tools=[
+        {
+            "name": "get_weather",
+            "description": "Get weather for a location",
+            "input_schema": {
+                "type": "object",
+                "properties": {"location": {"type": "string"}},
+                "required": ["location"]
+            }
+        }
+    ]
+)
+
+for block in response.content:
+    if block.type == "tool_use":
+        print(f"Tool: {block.name}")
+        print(f"Input: {block.input}")
+
+# With extended thinking
+response = client.messages.create(
+    model="gemini-2.5-flash",
+    max_tokens=16000,
+    thinking={
+        "type": "enabled",
+        "budget_tokens": 10000
+    },
+    messages=[{"role": "user", "content": "Solve this complex problem"}]
+)
+
+for block in response.content:
+    if block.type == "thinking":
+        print(f"Thinking: {block.thinking}")
+    elif block.type == "text":
+        print(f"Response: {block.text}")
+```
+
+### OpenAI Responses API
+
+The Responses API is OpenAI's newer API format. Use `httpx` or `requests` to call it directly:
+
+```bash
+pip install httpx
+```
 
 ```python
 import httpx
 
+BASE_URL = "http://localhost:8888/v1"
+API_KEY = "your_password"
+HEADERS = {"Authorization": f"Bearer {API_KEY}"}
+
+# Basic response
 response = httpx.post(
-    "http://localhost:8888/v1/responses",
-    headers={"Authorization": "Bearer your_password"},
+    f"{BASE_URL}/responses",
+    headers=HEADERS,
     json={
         "model": "gemini-2.5-flash",
-        "input": "What is 2+2?",
+        "input": "What is 2+2?"
     }
 )
 print(response.json()["output_text"])
-```
 
-### Responses API with Function Calling
-
-```python
-import httpx
-
+# With function calling
 response = httpx.post(
-    "http://localhost:8888/v1/responses",
-    headers={"Authorization": "Bearer your_password"},
+    f"{BASE_URL}/responses",
+    headers=HEADERS,
     json={
         "model": "gemini-2.5-flash",
         "input": "What's the weather in Paris?",
@@ -250,22 +345,15 @@ response = httpx.post(
     }
 )
 
-# Check for function calls in output
 for item in response.json()["output"]:
     if item["type"] == "function_call":
-        print(f"Call ID: {item['call_id']}")
         print(f"Function: {item['name']}")
         print(f"Arguments: {item['arguments']}")
-```
 
-### Responses API with Web Search
-
-```python
-import httpx
-
+# With web search
 response = httpx.post(
-    "http://localhost:8888/v1/responses",
-    headers={"Authorization": "Bearer your_password"},
+    f"{BASE_URL}/responses",
+    headers=HEADERS,
     json={
         "model": "gemini-2.5-flash",
         "input": "What are the latest news about AI?",
@@ -273,6 +361,33 @@ response = httpx.post(
     }
 )
 print(response.json()["output_text"])
+```
+
+### Native Gemini API
+
+For direct Gemini API passthrough, use `httpx` or `requests`:
+
+```python
+import httpx
+
+BASE_URL = "http://localhost:8888"
+API_KEY = "your_password"
+HEADERS = {"Authorization": f"Bearer {API_KEY}"}
+
+# Generate content
+response = httpx.post(
+    f"{BASE_URL}/v1beta/models/gemini-2.5-flash:generateContent",
+    headers=HEADERS,
+    json={
+        "contents": [{"parts": [{"text": "Hello!"}]}]
+    }
+)
+print(response.json()["candidates"][0]["content"]["parts"][0]["text"])
+
+# List models
+response = httpx.get(f"{BASE_URL}/v1beta/models", headers=HEADERS)
+for model in response.json()["models"]:
+    print(model["name"])
 ```
 
 ## Models
