@@ -30,35 +30,35 @@ class TestAuthenticateUser:
         request.headers = headers or {}
         return request
 
-    @patch("src.services.auth.GEMINI_AUTH_PASSWORD", None)
+    @patch("src.services.auth.middleware.GEMINI_AUTH_PASSWORD", None)
     def test_no_password_set_returns_anonymous(self):
         """When GEMINI_AUTH_PASSWORD is not set, should return anonymous."""
         request = self._create_mock_request()
         result = authenticate_user(request)
         assert result == "anonymous"
 
-    @patch("src.services.auth.GEMINI_AUTH_PASSWORD", "")
+    @patch("src.services.auth.middleware.GEMINI_AUTH_PASSWORD", "")
     def test_empty_password_returns_anonymous(self):
         """When GEMINI_AUTH_PASSWORD is empty, should return anonymous."""
         request = self._create_mock_request()
         result = authenticate_user(request)
         assert result == "anonymous"
 
-    @patch("src.services.auth.GEMINI_AUTH_PASSWORD", "secret123")
+    @patch("src.services.auth.middleware.GEMINI_AUTH_PASSWORD", "secret123")
     def test_valid_api_key_in_query(self):
         """Valid API key in query params should authenticate."""
         request = self._create_mock_request(query_params={"key": "secret123"})
         result = authenticate_user(request)
         assert result == "api_key_user"
 
-    @patch("src.services.auth.GEMINI_AUTH_PASSWORD", "secret123")
+    @patch("src.services.auth.middleware.GEMINI_AUTH_PASSWORD", "secret123")
     def test_valid_goog_api_key_header(self):
         """Valid x-goog-api-key header should authenticate."""
         request = self._create_mock_request(headers={"x-goog-api-key": "secret123"})
         result = authenticate_user(request)
         assert result == "goog_api_key_user"
 
-    @patch("src.services.auth.GEMINI_AUTH_PASSWORD", "secret123")
+    @patch("src.services.auth.middleware.GEMINI_AUTH_PASSWORD", "secret123")
     def test_valid_bearer_token(self):
         """Valid Bearer token should authenticate."""
         request = self._create_mock_request(
@@ -67,7 +67,7 @@ class TestAuthenticateUser:
         result = authenticate_user(request)
         assert result == "bearer_user"
 
-    @patch("src.services.auth.GEMINI_AUTH_PASSWORD", "secret123")
+    @patch("src.services.auth.middleware.GEMINI_AUTH_PASSWORD", "secret123")
     def test_valid_basic_auth(self):
         """Valid Basic auth should authenticate."""
         # Basic auth: base64("user:secret123")
@@ -78,7 +78,7 @@ class TestAuthenticateUser:
         result = authenticate_user(request)
         assert result == "basic_user"
 
-    @patch("src.services.auth.GEMINI_AUTH_PASSWORD", "secret123")
+    @patch("src.services.auth.middleware.GEMINI_AUTH_PASSWORD", "secret123")
     def test_invalid_api_key_raises_401(self):
         """Invalid API key should raise HTTPException 401."""
         request = self._create_mock_request(query_params={"key": "wrongkey"})
@@ -86,7 +86,7 @@ class TestAuthenticateUser:
             authenticate_user(request)
         assert exc_info.value.status_code == 401
 
-    @patch("src.services.auth.GEMINI_AUTH_PASSWORD", "secret123")
+    @patch("src.services.auth.middleware.GEMINI_AUTH_PASSWORD", "secret123")
     def test_invalid_bearer_token_raises_401(self):
         """Invalid Bearer token should raise HTTPException 401."""
         request = self._create_mock_request(
@@ -96,7 +96,7 @@ class TestAuthenticateUser:
             authenticate_user(request)
         assert exc_info.value.status_code == 401
 
-    @patch("src.services.auth.GEMINI_AUTH_PASSWORD", "secret123")
+    @patch("src.services.auth.middleware.GEMINI_AUTH_PASSWORD", "secret123")
     def test_no_credentials_raises_401(self):
         """Missing credentials should raise HTTPException 401."""
         request = self._create_mock_request()
@@ -104,7 +104,7 @@ class TestAuthenticateUser:
             authenticate_user(request)
         assert exc_info.value.status_code == 401
 
-    @patch("src.services.auth.GEMINI_AUTH_PASSWORD", "secret123")
+    @patch("src.services.auth.middleware.GEMINI_AUTH_PASSWORD", "secret123")
     def test_malformed_basic_auth_raises_401(self):
         """Malformed Basic auth should raise HTTPException 401."""
         request = self._create_mock_request(
@@ -250,7 +250,7 @@ class TestCredentialPool:
 
         assert result is None
 
-    @patch("src.services.auth.CREDENTIAL_RECOVERY_TIME", 1)
+    @patch("src.services.auth.credential_pool.CREDENTIAL_RECOVERY_TIME", 1)
     def test_credential_recovery_after_timeout(self):
         """Failed credential should recover after CREDENTIAL_RECOVERY_TIME."""
         pool = CredentialPool()

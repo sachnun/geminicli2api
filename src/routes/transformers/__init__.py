@@ -8,9 +8,11 @@ from .openai import (
 from .anthropic import (
     anthropic_request_to_gemini,
     gemini_response_to_anthropic,
+    create_anthropic_error,
+)
+from .anthropic_stream import (
     AnthropicStreamProcessor,
     format_sse_event,
-    create_anthropic_error,
 )
 from .responses import (
     responses_request_to_gemini,

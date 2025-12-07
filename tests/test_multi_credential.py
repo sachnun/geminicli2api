@@ -13,6 +13,7 @@ from src.services.auth import (
     _load_multiple_credentials_from_files,
     initialize_credential_pool,
 )
+from src.services.auth.credential_pool import set_credential_pool
 
 
 class TestLoadCredentialEntryFromJson:
@@ -28,7 +29,9 @@ class TestLoadCredentialEntryFromJson:
             }
         )
 
-        with patch("src.services.auth._create_credentials_from_data") as mock_create:
+        with patch(
+            "src.services.auth.credentials._create_credentials_from_data"
+        ) as mock_create:
             mock_creds = MagicMock()
             mock_creds.expired = False
             mock_create.return_value = mock_creds
@@ -67,7 +70,9 @@ class TestLoadCredentialEntryFromJson:
             }
         )
 
-        with patch("src.services.auth._create_credentials_from_data") as mock_create:
+        with patch(
+            "src.services.auth.credentials._create_credentials_from_data"
+        ) as mock_create:
             mock_creds = MagicMock()
             mock_creds.expired = False
             mock_create.return_value = mock_creds
@@ -95,7 +100,7 @@ class TestLoadCredentialEntryFromFile:
 
         try:
             with patch(
-                "src.services.auth._create_credentials_from_data"
+                "src.services.auth.credentials._create_credentials_from_data"
             ) as mock_create:
                 mock_creds = MagicMock()
                 mock_creds.expired = False
@@ -147,7 +152,9 @@ class TestLoadMultipleCredentialsFromEnv:
     )
     def test_loads_indexed_env_vars(self):
         """Should load GEMINI_CREDENTIALS_N environment variables."""
-        with patch("src.services.auth._load_credential_entry_from_json") as mock_load:
+        with patch(
+            "src.services.auth.credentials._load_credential_entry_from_json"
+        ) as mock_load:
             mock_entry = MagicMock()
             mock_load.return_value = mock_entry
 
@@ -174,7 +181,7 @@ class TestLoadMultipleCredentialsFromEnv:
             return MagicMock()
 
         with patch(
-            "src.services.auth._load_credential_entry_from_json",
+            "src.services.auth.credentials._load_credential_entry_from_json",
             side_effect=track_calls,
         ):
             _load_multiple_credentials_from_env()
@@ -209,7 +216,9 @@ class TestLoadMultipleCredentialsFromFiles:
     )
     def test_loads_comma_separated_files(self):
         """Should load comma-separated file paths."""
-        with patch("src.services.auth._load_credential_entry_from_file") as mock_load:
+        with patch(
+            "src.services.auth.credentials._load_credential_entry_from_file"
+        ) as mock_load:
             mock_entry = MagicMock()
             mock_load.return_value = mock_entry
 
@@ -225,7 +234,9 @@ class TestLoadMultipleCredentialsFromFiles:
     )
     def test_handles_whitespace_in_paths(self):
         """Should handle whitespace around file paths."""
-        with patch("src.services.auth._load_credential_entry_from_file") as mock_load:
+        with patch(
+            "src.services.auth.credentials._load_credential_entry_from_file"
+        ) as mock_load:
             mock_entry = MagicMock()
             mock_load.return_value = mock_entry
 
@@ -249,9 +260,9 @@ class TestInitializeCredentialPool:
             project_id=None,
         )
 
-    @patch("src.services.auth._credential_pool", None)
-    @patch("src.services.auth._load_multiple_credentials_from_env")
-    @patch("src.services.auth._load_multiple_credentials_from_files")
+    @patch("src.services.auth.credential_pool._credential_pool", None)
+    @patch("src.services.auth.credentials._load_multiple_credentials_from_env")
+    @patch("src.services.auth.credentials._load_multiple_credentials_from_files")
     def test_loads_from_multiple_sources(self, mock_files, mock_env):
         """Should load credentials from all sources."""
         mock_entry1 = self._create_mock_entry()
@@ -265,16 +276,18 @@ class TestInitializeCredentialPool:
         mock_env.assert_called_once()
         mock_files.assert_called_once()
 
-    @patch("src.services.auth._credential_pool", None)
-    @patch("src.services.auth._load_multiple_credentials_from_env")
-    @patch("src.services.auth._load_multiple_credentials_from_files")
+    @patch("src.services.auth.credential_pool._credential_pool", None)
+    @patch("src.services.auth.credentials._load_multiple_credentials_from_env")
+    @patch("src.services.auth.credentials._load_multiple_credentials_from_files")
     @patch.dict(os.environ, {"GEMINI_CREDENTIALS": '{"refresh_token":"single"}'})
     def test_fallback_to_single_credential(self, mock_files, mock_env):
         """Should fallback to single GEMINI_CREDENTIALS if no indexed vars."""
         mock_env.return_value = []
         mock_files.return_value = []
 
-        with patch("src.services.auth._load_credential_entry_from_json") as mock_load:
+        with patch(
+            "src.services.auth.credentials._load_credential_entry_from_json"
+        ) as mock_load:
             mock_entry = self._create_mock_entry()
             mock_load.return_value = mock_entry
 
@@ -283,16 +296,18 @@ class TestInitializeCredentialPool:
             assert pool.size() == 1
             mock_load.assert_called_once()
 
-    @patch("src.services.auth._credential_pool", None)
-    @patch("src.services.auth._load_multiple_credentials_from_env")
-    @patch("src.services.auth._load_multiple_credentials_from_files")
+    @patch("src.services.auth.credential_pool._credential_pool", None)
+    @patch("src.services.auth.credentials._load_multiple_credentials_from_env")
+    @patch("src.services.auth.credentials._load_multiple_credentials_from_files")
     @patch.dict(os.environ, {}, clear=True)
     def test_fallback_to_credential_file(self, mock_files, mock_env):
         """Should fallback to default credential file if no env vars."""
         mock_env.return_value = []
         mock_files.return_value = []
 
-        with patch("src.services.auth._load_credential_entry_from_file") as mock_load:
+        with patch(
+            "src.services.auth.credentials._load_credential_entry_from_file"
+        ) as mock_load:
             mock_entry = self._create_mock_entry()
             mock_load.return_value = mock_entry
 
